@@ -1,3 +1,4 @@
+import time
 import logging  # ---------------------二开部分  密钥额度限制 ---------------------
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -19,14 +20,10 @@ from controllers.service_api.app.error_extend import (
     ApiTokenMonthNoMoneyErrorExtend,
 )
 from extensions.ext_database import db
+from extensions.ext_redis import redis_client
 from libs.login import _get_user
-from models.account import (  # 二开部分  额度限制，API调用计费，新增TenantAccountRole
-    Account,
-    Tenant,
-    TenantAccountJoin,
-    TenantAccountRole,
-    TenantStatus,
-)
+from models.account import Account, Tenant, TenantAccountJoin, TenantStatus, TenantAccountRole # 二开部分  额度限制，API调用计费，新增TenantAccountRole
+from models.dataset import RateLimitLog
 from models.account_money_extend import AccountMoneyExtend
 from models.api_token_money_extend import (
     ApiTokenMoneyExtend,  # 二开部分  密钥额度限制
@@ -75,22 +72,32 @@ def validate_app_token(view: Optional[Callable] = None, *, fetch_user_arg: Optio
             if tenant.status == TenantStatus.ARCHIVE:
                 raise Forbidden("The workspace's status is archived.")
 
-            # ---------------------二开部分Begin  额度限制，API调用计费 ---------------------
-            tenantAccountJoin = (
-                db.session.query(TenantAccountJoin)
-                .filter(
-                    TenantAccountJoin.tenant_id == app_model.tenant_id,
-                    TenantAccountJoin.role == TenantAccountRole.OWNER,
-                )
-                .first()
-            )
-            if not tenantAccountJoin:
-                raise Forbidden("The workspace has not owner")
+            tenant_account_join = (
+                db.session.query(Tenant, TenantAccountJoin)
+                .filter(Tenant.id == api_token.tenant_id)
+                .filter(TenantAccountJoin.tenant_id == Tenant.id)
+                .filter(TenantAccountJoin.role.in_(["owner"]))
+                .filter(Tenant.status == TenantStatus.NORMAL)
+                .one_or_none()
+            )  # TODO: only owner information is required, so only one is returned.
+            if tenant_account_join:
+                tenant, ta = tenant_account_join
+                account = db.session.query(Account).filter(Account.id == ta.account_id).first()
+                # Login admin
+                if account:
+                    account.current_tenant = tenant
+                    current_app.login_manager._update_request_context_with_user(account)  # type: ignore
+                    user_logged_in.send(current_app._get_current_object(), user=_get_user())  # type: ignore
+                else:
+                    raise Unauthorized("Tenant owner account does not exist.")
+            else:
+                raise Unauthorized("Tenant does not exist.")
 
+            # ---------------------二开部分Begin  额度限制，API调用计费 ---------------------
             # TODO 需要写入缓存，读缓存
             account_money = (
                 db.session.query(AccountMoneyExtend)
-                .filter(AccountMoneyExtend.account_id == tenantAccountJoin.account_id)
+                .filter(AccountMoneyExtend.account_id == ta.account_id)
                 .first()
             )
             if account_money and account_money.used_quota >= account_money.total_quota:
@@ -140,7 +147,7 @@ def validate_app_token(view: Optional[Callable] = None, *, fetch_user_arg: Optio
                 # ---------------------二开部分Begin  额度限制，API调用计费 ---------------------
                 if kwargs.get("end_user"):
                     create_or_update_end_user_account_join_extend(
-                        kwargs["end_user"].id, tenantAccountJoin.account_id, app_model.id
+                        kwargs["end_user"].id, ta.account_id, app_model.id
                     )
                 # ---------------------二开部分End  额度限制，API调用计费 ---------------------
 
@@ -206,6 +213,43 @@ def cloud_edition_billing_knowledge_limit_check(resource: str, api_token_type: s
     return interceptor
 
 
+def cloud_edition_billing_rate_limit_check(resource: str, api_token_type: str):
+    def interceptor(view):
+        @wraps(view)
+        def decorated(*args, **kwargs):
+            api_token = validate_and_get_api_token(api_token_type)
+
+            if resource == "knowledge":
+                knowledge_rate_limit = FeatureService.get_knowledge_rate_limit(api_token.tenant_id)
+                if knowledge_rate_limit.enabled:
+                    current_time = int(time.time() * 1000)
+                    key = f"rate_limit_{api_token.tenant_id}"
+
+                    redis_client.zadd(key, {current_time: current_time})
+
+                    redis_client.zremrangebyscore(key, 0, current_time - 60000)
+
+                    request_count = redis_client.zcard(key)
+
+                    if request_count > knowledge_rate_limit.limit:
+                        # add ratelimit record
+                        rate_limit_log = RateLimitLog(
+                            tenant_id=api_token.tenant_id,
+                            subscription_plan=knowledge_rate_limit.subscription_plan,
+                            operation="knowledge",
+                        )
+                        db.session.add(rate_limit_log)
+                        db.session.commit()
+                        raise Forbidden(
+                            "Sorry, you have reached the knowledge base request rate limit of your subscription."
+                        )
+            return view(*args, **kwargs)
+
+        return decorated
+
+    return interceptor
+
+
 def validate_dataset_token(view=None):
     def decorator(view):
         @wraps(view)
@@ -221,7 +265,7 @@ def validate_dataset_token(view=None):
             )  # TODO: only owner information is required, so only one is returned.
             if tenant_account_join:
                 tenant, ta = tenant_account_join
-                account = Account.query.filter_by(id=ta.account_id).first()
+                account = db.session.query(Account).filter(Account.id == ta.account_id).first()
                 # Login admin
                 if account:
                     account.current_tenant = tenant

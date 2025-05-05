@@ -37,6 +37,12 @@ export type UserProfileResponse = {
   // ----------------------- 二开部分Stop 添加用户权限 - --------------------------------
 }
 
+// ----------------------- 二开部分Start oauth2 - --------------------------------
+export type OAuth2 = {
+  logout_url: string
+}
+// ----------------------- 二开部分Start oauth2 - --------------------------------
+
 export type UserProfileOriginResponse = {
   json: () => Promise<UserProfileResponse>
   bodyUsed: boolean
@@ -133,7 +139,6 @@ export type IWorkspace = {
 export type ICurrentWorkspace = Omit<IWorkspace, 'current'> & {
   role: 'owner' | 'admin' | 'editor' | 'dataset_operator' | 'normal'
   providers: Provider[]
-  in_trail: boolean
   trial_end_reason?: string
   custom_config?: {
     remove_webapp_brand?: boolean
@@ -187,9 +192,15 @@ export enum DataSourceCategory {
 export enum DataSourceProvider {
   fireCrawl = 'firecrawl',
   jinaReader = 'jinareader',
+  waterCrawl = 'watercrawl',
 }
 
 export type FirecrawlConfig = {
+  api_key: string
+  base_url: string
+}
+
+export type WatercrawlConfig = {
   api_key: string
   base_url: string
 }

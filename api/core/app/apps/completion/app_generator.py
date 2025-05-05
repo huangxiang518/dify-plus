@@ -38,7 +38,7 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
         args: Mapping[str, Any],
         invoke_from: InvokeFrom,
         streaming: Literal[True],
-    ) -> Generator[str, None, None]: ...
+    ) -> Generator[str | Mapping[str, Any], None, None]: ...
 
     @overload
     def generate(
@@ -57,8 +57,8 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
         user: Union[Account, EndUser],
         args: Mapping[str, Any],
         invoke_from: InvokeFrom,
-        streaming: bool,
-    ) -> Mapping[str, Any] | Generator[str, None, None]: ...
+        streaming: bool = False,
+    ) -> Union[Mapping[str, Any], Generator[str | Mapping[str, Any], None, None]]: ...
 
     def generate(
         self,
@@ -67,7 +67,7 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
         args: Mapping[str, Any],
         invoke_from: InvokeFrom,
         streaming: bool = True,
-    ):
+    ) -> Union[Mapping[str, Any], Generator[str | Mapping[str, Any], None, None]]:
         """
         Generate App response.
 
@@ -75,7 +75,7 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
         :param user: account or end user
         :param args: request args
         :param invoke_from: invoke from source
-        :param stream: is stream
+        :param streaming: is stream
         """
         query = args["query"]
         if not isinstance(query, str):
@@ -240,7 +240,7 @@ class CompletionAppGenerator(MessageBasedAppGenerator):
         user: Union[Account, EndUser],
         invoke_from: InvokeFrom,
         stream: bool = True,
-    ) -> Union[Mapping[str, Any], Generator[str, None, None]]:
+    ) -> Union[Mapping, Generator[Mapping | str, None, None]]:
         """
         Generate App response.
 

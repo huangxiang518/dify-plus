@@ -1,9 +1,12 @@
+import json
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
-
+import re # extend: oauth2
 from configs import dify_config
 from extensions.ext_database import db
+from flask import request # extend: oauth2
+from extensions.ext_redis import redis_client # extend: oauth2
 from services.billing_service import BillingService
 from services.enterprise.enterprise_service import EnterpriseService
 from models.system_extend import SystemIntegrationExtend, SystemIntegrationClassify # Extend DingTalk third-party login
@@ -17,6 +20,11 @@ class SubscriptionModel(BaseModel):
 class BillingModel(BaseModel):
     enabled: bool = False
     subscription: SubscriptionModel = SubscriptionModel()
+
+
+class EducationModel(BaseModel):
+    enabled: bool = False
+    activated: bool = False
 
 
 class LimitationModel(BaseModel):
@@ -40,9 +48,11 @@ class LicenseModel(BaseModel):
 
 class FeatureModel(BaseModel):
     billing: BillingModel = BillingModel()
+    education: EducationModel = EducationModel()
     members: LimitationModel = LimitationModel(size=0, limit=1)
     apps: LimitationModel = LimitationModel(size=0, limit=10)
     vector_space: LimitationModel = LimitationModel(size=0, limit=5)
+    knowledge_rate_limit: int = 10
     annotation_quota_limit: LimitationModel = LimitationModel(size=0, limit=10)
     documents_upload_quota: LimitationModel = LimitationModel(size=0, limit=50)
     docs_processing: str = "standard"
@@ -54,12 +64,20 @@ class FeatureModel(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 
+class KnowledgeRateLimitModel(BaseModel):
+    enabled: bool = False
+    limit: int = 10
+    subscription_plan: str = ""
+
+
 class SystemFeatureModel(BaseModel):
     sso_enforced_for_signin: bool = False
     sso_enforced_for_signin_protocol: str = ""
     sso_enforced_for_web: bool = False
     sso_enforced_for_web_protocol: str = ""
     enable_web_sso_switch_component: bool = False
+    enable_marketplace: bool = False
+    max_plugin_package_size: int = dify_config.PLUGIN_MAX_PACKAGE_SIZE
     enable_email_code_login: bool = False
     enable_email_password_login: bool = True
     enable_social_oauth_login: bool = False
@@ -68,6 +86,7 @@ class SystemFeatureModel(BaseModel):
     is_email_setup: bool = False
     license: LicenseModel = LicenseModel()
     is_custom_auth2: str = ""  # extend: Customizing AUTH2
+    is_custom_auth2_logout: str = ""  # extend: Customizing AUTH2
     ding_talk_client_id: str = "" # extend: DingTalk third-party login
     ding_talk_corp_id: str = "" # extend: DingTalk sidebar login
     ding_talk: bool = "" # extend: DingTalk sidebar login
@@ -86,8 +105,25 @@ class FeatureService:
         return features
 
     @classmethod
+    def get_knowledge_rate_limit(cls, tenant_id: str):
+        knowledge_rate_limit = KnowledgeRateLimitModel()
+        if dify_config.BILLING_ENABLED and tenant_id:
+            knowledge_rate_limit.enabled = True
+            limit_info = BillingService.get_knowledge_rate_limit(tenant_id)
+            knowledge_rate_limit.limit = limit_info.get("limit", 10)
+            knowledge_rate_limit.subscription_plan = limit_info.get("subscription_plan", "sandbox")
+        return knowledge_rate_limit
+
+    @classmethod
     def get_system_features(cls) -> SystemFeatureModel:
         system_features = SystemFeatureModel()
+        # extend start: oauth2
+        api_host = request.host_url
+        # 通过nginx代理转发会导致 request.host_url 获取的是内网ip，这个时候使用.env的配置
+        if bool(re.search(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}', request.host_url)):
+            api_host = dify_config.CONSOLE_WEB_URL
+        redis_client.set("api_host", api_host)
+        # extend stop: oauth2
 
         cls._fulfill_system_params_from_env(system_features)
 
@@ -95,6 +131,9 @@ class FeatureService:
             system_features.enable_web_sso_switch_component = True
 
             cls._fulfill_params_from_enterprise(system_features)
+
+        if dify_config.MARKETPLACE_ENABLED:
+            system_features.enable_marketplace = True
 
         return system_features
 
@@ -106,15 +145,20 @@ class FeatureService:
         system_features.is_allow_register = dify_config.ALLOW_REGISTER
         system_features.is_allow_create_workspace = dify_config.ALLOW_CREATE_WORKSPACE
         system_features.is_email_setup = dify_config.MAIL_TYPE is not None and dify_config.MAIL_TYPE != ""
-        # extend start: Customizing AUTH2
-        system_features.is_custom_auth2 = dify_config.OAUTH2_CLIENT_URL
-        # extend stop: Customizing AUTH2
         # extend start: DingTalk third-party login
         for i in db.session.query(SystemIntegrationExtend).filter(SystemIntegrationExtend.status == True).all():
             if i.classify == SystemIntegrationClassify.SYSTEM_INTEGRATION_DINGTALK:
                 system_features.ding_talk_client_id = i.app_key
                 system_features.ding_talk_corp_id = i.corp_id
                 system_features.ding_talk = i.status
+                # Extend: OAuth2 Start
+            elif i.classify == SystemIntegrationClassify.SYSTEM_INTEGRATION_OAUTH_TWO:
+                config = json.loads(i.config)
+                system_features.is_custom_auth2 = i.status
+                if "logout_url" in config.keys():
+                    system_features.is_custom_auth2_logout = "{}{}".format(
+                        config['server_url'], config['logout_url'])
+                # Extend: OAuth2 Stop
         # extend stop: DingTalk third-party login
 
     @classmethod
@@ -122,6 +166,7 @@ class FeatureService:
         features.can_replace_logo = dify_config.CAN_REPLACE_LOGO
         features.model_load_balancing_enabled = dify_config.MODEL_LB_ENABLED
         features.dataset_operator_enabled = dify_config.DATASET_OPERATOR_ENABLED
+        features.education.enabled = dify_config.EDUCATION_ENABLED
 
     @classmethod
     def _fulfill_params_from_billing_api(cls, features: FeatureModel, tenant_id: str):
@@ -130,6 +175,7 @@ class FeatureService:
         features.billing.enabled = billing_info["enabled"]
         features.billing.subscription.plan = billing_info["subscription"]["plan"]
         features.billing.subscription.interval = billing_info["subscription"]["interval"]
+        features.education.activated = billing_info["subscription"].get("education", False)
 
         if "members" in billing_info:
             features.members.size = billing_info["members"]["size"]
@@ -159,6 +205,9 @@ class FeatureService:
 
         if "model_load_balancing_enabled" in billing_info:
             features.model_load_balancing_enabled = billing_info["model_load_balancing_enabled"]
+
+        if "knowledge_rate_limit" in billing_info:
+            features.knowledge_rate_limit = billing_info["knowledge_rate_limit"]["limit"]
 
     @classmethod
     def _fulfill_params_from_enterprise(cls, features):

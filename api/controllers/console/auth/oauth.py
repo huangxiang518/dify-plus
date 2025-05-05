@@ -5,6 +5,8 @@ from typing import Optional
 import requests
 from flask import current_app, redirect, request
 from flask_restful import Resource  # type: ignore
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from werkzeug.exceptions import Unauthorized
 
 from configs import dify_config
@@ -43,16 +45,9 @@ def get_oauth_providers():
                 redirect_uri=dify_config.CONSOLE_API_URL + "/console/api/oauth/authorize/google",
             )
 
-        if not dify_config.OAUTH2_CLIENT_ID or not dify_config.OAUTH2_CLIENT_SECRET:
-            oa_oauth = None
-        else:
-            oa_oauth = OaOAuth(
-                client_id=dify_config.OAUTH2_CLIENT_ID,
-                client_secret=dify_config.OAUTH2_CLIENT_SECRET,
-                redirect_uri=dify_config.CONSOLE_API_URL + "/console/api/oauth/authorize/oauth2",
-            )
+        oauth2 = OaOAuth(client_id='', client_secret='', redirect_uri='') # Extend: oauth2
 
-        OAUTH_PROVIDERS = {"github": github_oauth, "google": google_oauth, "oauth2": oa_oauth}
+        OAUTH_PROVIDERS = {"github": github_oauth, "google": google_oauth, "oauth2": oauth2}
         return OAUTH_PROVIDERS
 
 
@@ -145,7 +140,8 @@ def _get_account_by_openid_or_email(provider: str, user_info: OAuthUserInfo) -> 
     account: Optional[Account] = Account.get_by_openid(provider, user_info.id)
 
     if not account:
-        account = Account.query.filter_by(email=user_info.email).first()
+        with Session(db.engine) as session:
+            account = session.execute(select(Account).filter_by(email=user_info.email)).scalar_one_or_none()
 
     return account
 

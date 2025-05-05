@@ -9,7 +9,6 @@ import jschardet from 'jschardet'
 // } from 'react-papaparse'
 // 二开部分 - End 自定义CSVReader
 import { useTranslation } from 'react-i18next'
-import s from './style.module.css'
 import cn from '@/utils/classnames'
 import { Csv as CSVIcon } from '@/app/components/base/icons/src/public/files'
 
@@ -39,10 +38,24 @@ const CustomCSVReader: React.FC<CCProps> = ({
       // 检测文本编码
       const encodingResult = jschardet.detect(result)
       let encoding = encodingResult.encoding || 'utf-8'
+      // Extend start: 处理可能的误判，将 ISO-8859-2 视为 GBK
+      // 处理可能的误判，将 ISO-8859-2 视为 GBK
+      if (encoding === 'ISO-8859-2') {
+        encoding = 'gbk'
+      }
+      else if (encodingResult.encoding == null) {
+        // 判断是否windows
+        const language = navigator.language || navigator.userLanguage
+        const isWindows = (navigator.platform && navigator.platform.includes('Win')) || navigator.userAgent.includes('Win')
+        const isChineseLanguage = /^zh/i.test(language) || (navigator.languages && navigator.languages.some(lang => /^zh/i.test(lang)))
+        if (isWindows && isChineseLanguage)
+          encoding = 'gbk'
+      }
 
       // 处理可能的误判，将 ISO-8859-2 视为 GBK
-      if (encoding === 'ISO-8859-2')
+      if (encoding === 'ISO-8859-2' || encoding === 'TIS-620' || !encoding.indexOf('windows'))
         encoding = 'gbk'
+      // Extend stop: 处理可能的误判，将 ISO-8859-2 视为 GBK
 
       console.log('encoding: ', encoding)
       // 重新用检测到的编码读取文件内容
@@ -151,23 +164,27 @@ const CSVReader: FC<Props> = ({
         <>
           <div
             {...getRootProps()}
-            className={cn(s.zone, zoneHover && s.zoneHover, acceptedFile ? 'px-6' : 'justify-center border-dashed text-gray-500')}
+            className={cn(
+              'system-sm-regular flex h-20 items-center rounded-xl border border-dashed border-components-dropzone-border bg-components-dropzone-bg',
+              acceptedFile && 'border-solid border-components-panel-border bg-components-panel-on-panel-item-bg px-6 hover:border-components-panel-bg-blur hover:bg-components-panel-on-panel-item-bg-hover',
+              zoneHover && 'border border-components-dropzone-border-accent bg-components-dropzone-bg-accent',
+            )}
           >
             {
               acceptedFile
                 ? (
-                  <div className='w-full flex items-center space-x-2'>
+                  <div className='flex w-full items-center space-x-2'>
                     <CSVIcon className="shrink-0" />
                     <div className='flex w-0 grow'>
-                      <span className='max-w-[calc(100%_-_30px)] text-ellipsis whitespace-nowrap overflow-hidden text-gray-800'>{acceptedFile.name.replace(/.csv$/, '')}</span>
-                      <span className='shrink-0 text-gray-500'>.csv</span>
+                      <span className='max-w-[calc(100%_-_30px)] truncate text-text-secondary'>{acceptedFile.name.replace(/.csv$/, '')}</span>
+                      <span className='shrink-0 text-text-tertiary'>.csv</span>
                     </div>
                   </div>
                 )
                 : (
-                  <div className='flex items-center justify-center space-x-2'>
+                  <div className='flex w-full items-center justify-center space-x-2'>
                     <CSVIcon className="shrink-0" />
-                    <div className='text-gray-500'>{t('share.generation.csvUploadTitle')}<span className='text-primary-400'>{t('share.generation.browse')}</span></div>
+                    <div className='text-text-tertiary'>{t('share.generation.csvUploadTitle')}<span className='cursor-pointer text-text-accent'>{t('share.generation.browse')}</span></div>
                   </div>
                 )}
           </div>
